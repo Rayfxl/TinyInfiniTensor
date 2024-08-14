@@ -25,8 +25,10 @@ namespace infini
         // 优化前
         g->print();
         g->optimize();
+        std::cout << "optimize success" << std::endl;
         // 优化后
-        g->print();
+        //g->print();
+        std::cout << "optimize success" << std::endl;
         EXPECT_EQ(g->getOperators().size(), 1);
         EXPECT_EQ(g->getTensors().size(), 3);
         EXPECT_EQ(g->getOperators()[0]->getOpType().underlying(), 7);

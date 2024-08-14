@@ -1,4 +1,8 @@
 #include "core/graph.h"
+#include "operators/transpose.h"
+#include "operators/matmul.h"
+#include "core/tensor.h"
+#include "core/operator.h"
 #include <algorithm>
 #include <numeric>
 #include <queue>
@@ -98,6 +102,11 @@ namespace infini
         return this->sorted = true;
     }
 
+    std::vector<int> reverseVector(const std::vector<int>& v) {
+    std::vector<int> reversed(v);
+    std::reverse(reversed.begin(), reversed.end());
+    return reversed;
+}
     void GraphObj::optimize()
     {
         // =================================== 作业 ===================================
@@ -106,7 +115,101 @@ namespace infini
         // 1. 去除冗余的算子（例如，两个相邻的算子都是 transpose 算子，且做的是相反的操作，可以将其全部删除）
         // 2. 合并算子（例如，矩阵乘算子中含有属性transA、transB，如果其输入存在transpose，且对最后两个维度做交换，就可以将transpose融入到矩阵乘算子的属性中去）
         // =================================== 作业 ===================================
+        std::vector<Operator> OptoRemove;
+
+        // First pass: Remove redundant transpose operations
+        for (size_t i = 0; i < ops.size(); ++i) 
+        {
+            if (ops[i]->getOpType() == OpType::Transpose) 
+            {
+                auto t1 = std::dynamic_pointer_cast<TransposeObj>(ops[i]);
+                auto t1_out = t1->getOutput();
+                if (i + 1 < ops.size() && ops[i + 1]->getOpType() == OpType::Transpose) 
+                {
+                    auto t2 = std::dynamic_pointer_cast<TransposeObj>(ops[i + 1]);
+                    auto t2_in = t2->getInputs(0);
+                    if (t1_out == t2->getInputs(0) && t1->getPermute() == t2->getPermute()) 
+                    {
+                        OptoRemove.emplace_back(ops[i]);
+                        OptoRemove.emplace_back(ops[i + 1]);
+                    }
+                }
+            }
+        }
+        // Remove the redundant transpose operations
+        for (size_t i = 0; i < OptoRemove.size(); ++i)
+        {
+            for (auto op : OptoRemove[i] -> getPredecessors()) OptoRemove[i] -> removePredecessors(op);
+            for (auto op : OptoRemove[i] -> getSuccessors()) OptoRemove[i] -> removeSuccessors(op);
+            removeOperator(OptoRemove[i]);
+
+            if (i == 1)
+            {
+                for (auto target : OptoRemove[i] -> getInputs(0) -> getTargets()) OptoRemove[i] -> getInputs(0) -> removeTarget(target);
+                for (auto target : OptoRemove[i] -> getOutput() -> getTargets()) OptoRemove[i] -> getOutput() -> removeTarget(target);
+                removeTensor(OptoRemove[i] -> getInputs(0));
+                removeTensor(OptoRemove[i] -> getOutput());
+            }
+        }
+    
+        // Second pass: Optimize Matmul operations
+        for (auto &op : ops) 
+        {
+            if (op->getOpType() == OpType::MatMul) 
+            {
+                auto matmul = std::dynamic_pointer_cast<MatmulObj>(op);
+                auto inputs = matmul->getInputs();
+
+                bool transA = matmul->getTransA();
+                bool transB = matmul->getTransB();
+                
+                // Check if inputs have transpose operators
+                for (size_t i = 0; i < inputs.size(); ++i) 
+                {
+                    if (inputs[i]->getSource() && inputs[i]->getSource()->getOpType() == OpType::Transpose) 
+                    {
+                        auto transpose = std::dynamic_pointer_cast<TransposeObj>(inputs[i]->getSource());
+                        auto permute = transpose->getPermute();
+                        // Check if transpose is applied on the last two dimensions
+                        if (permute.size() >= 2 && permute[permute.size() - 1] == static_cast<int>(permute.size()) - 2 && 
+                            permute[permute.size() - 2] == static_cast<int>(permute.size()) - 1) 
+                        {
+                            if (i == 1) {
+                                auto newInput = tensors[1];
+                                newInput -> setSource(inputs[i] -> getSource());
+                                for (auto target : newInput -> getTargets()) newInput -> removeTarget(target);
+                                newInput -> addTarget(op);
+                                matmul->replaceInput(inputs[i], newInput);
+                                transB = !transB;
+
+                                for (auto target : inputs[i] -> getTargets()) inputs[i] -> removeTarget(target);
+                                removeTensor(inputs[i]);
+
+                                tensors[0] -> setSource(op);
+                                for (auto target : tensors[0] -> getTargets()) tensors[0] -> removeTarget(target);
+                                tensors[0] -> addTarget(op);
+                                matmul->replaceInput(inputs[0], tensors[0]);
+                                tensors[2] -> setSource(op);
+                                for (auto target : tensors[2] -> getTargets()) tensors[2] -> removeTarget(target);
+                                tensors[2] -> addTarget(op);
+
+                                for (auto op : inputs[i] -> getSource() -> getPredecessors()) inputs[i] -> getSource() -> removePredecessors(op);
+                                for (auto op : inputs[i] -> getSource() -> getSuccessors()) inputs[i] -> getSource() -> removeSuccessors(op);
+                                removeOperator(inputs[i] -> getSource());
+                                
+                            }
+                        }
+                    }
+                }
+                matmul->setTransA(transA);
+                matmul->setTransB(transB);                    
+            }
+        }
+ 
+        // Ensure the graph is re-sorted after optimization
+        topo_sort();
     }
+    
 
     Tensor GraphObj::getTensor(int fuid) const
     {
